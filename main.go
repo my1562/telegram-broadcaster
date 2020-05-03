@@ -1,13 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
+	"github.com/hibiken/asynq"
+	"github.com/my1562/queue"
 	"github.com/my1562/telegram-broadcaster/config"
 	"github.com/my1562/telegram-broadcaster/tg"
-	"github.com/streadway/amqp"
 	"go.uber.org/dig"
 )
 
@@ -22,70 +22,47 @@ type TelegramNotification struct {
 	Message string
 }
 
+type NotifierImpl struct {
+	bot *tgbotapi.BotAPI
+}
+
+func NewNotifierImpl(bot *tgbotapi.BotAPI) queue.INotifyExecutor {
+	return &NotifierImpl{bot: bot}
+}
+
+func (n *NotifierImpl) Notify(chatID int64, message string) error {
+	log.Printf("Sending to %d: %s", chatID, message)
+
+	msg := tgbotapi.NewMessage(chatID, message)
+
+	if _, err := n.bot.Send(msg); err != nil {
+		log.Println(err)
+		return err
+	}
+
+	return nil
+}
+
 func main() {
 
 	c := dig.New()
 	c.Provide(config.NewConfig)
 	c.Provide(tg.NewTg)
+	c.Provide(NewNotifierImpl)
+	c.Provide(queue.NewNotifyHandler)
 
-	err := c.Invoke(func(config *config.Config, bot *tgbotapi.BotAPI) {
+	err := c.Invoke(func(config *config.Config, bot *tgbotapi.BotAPI, handler *queue.NotifyHandler) {
 
-		conn, err := amqp.Dial(config.RabbitmqURL)
-		failOnError(err, "Failed to connect to RabbitMQ")
-		defer conn.Close()
+		redis := asynq.RedisClientOpt{Addr: config.Redis}
+		server := asynq.NewServer(redis, asynq.Config{
+			Concurrency: 1,
+		})
+		mux := asynq.NewServeMux()
+		mux.Handle(queue.TaskTypeNotify, handler)
 
-		ch, err := conn.Channel()
-		failOnError(err, "Failed to open a channel")
-		defer ch.Close()
-
-		q, err := ch.QueueDeclare(
-			"hello", // name
-			false,   // durable
-			false,   // delete when unused
-			false,   // exclusive
-			false,   // no-wait
-			nil,     // arguments
-		)
-		failOnError(err, "Failed to declare a queue")
-
-		msgs, err := ch.Consume(
-			q.Name, // queue
-			"",     // consumer
-			true,   // auto-ack
-			false,  // exclusive
-			false,  // no-local
-			false,  // no-wait
-			nil,    // args
-		)
-		failOnError(err, "Failed to register a consumer")
-		forever := make(chan bool)
-
-		go func() {
-			for d := range msgs {
-				log.Printf("Received a message: %s", d.Body)
-
-				notification := &TelegramNotification{}
-				json.Unmarshal(d.Body, notification)
-				if notification.ChatID == 0 {
-					log.Println("[warning] ChatID==0")
-					continue
-				}
-				if notification.Message == "" {
-					log.Println("[warning] Message is empty")
-					continue
-				}
-
-				msg := tgbotapi.NewMessage(notification.ChatID, notification.Message)
-				_, err := bot.Send(msg)
-				if err != nil {
-					log.Println(err)
-				}
-			}
-		}()
-
-		log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
-
-		<-forever
+		if err := server.Run(mux); err != nil {
+			log.Fatalf("could not run server: %v", err)
+		}
 
 	})
 	if err != nil {
