@@ -8,8 +8,8 @@ import (
 )
 
 type Config struct {
-	TGToken     string
-	RabbitmqURL string
+	TGToken string
+	Redis   string
 }
 
 func NewConfig() *Config {
@@ -27,8 +27,11 @@ func NewConfig() *Config {
 	}
 
 	config := &Config{
-		TGToken:     os.Getenv("TELEGRAM_APITOKEN"),
-		RabbitmqURL: os.Getenv("RABBITMQ_URL"),
+		TGToken: os.Getenv("TELEGRAM_APITOKEN"),
+		Redis:   os.Getenv("REDIS"),
+	}
+	if config.Redis == "" {
+		config.Redis = "127.0.0.1:6379"
 	}
 
 	return config
